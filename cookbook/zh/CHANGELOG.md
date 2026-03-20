@@ -1,0 +1,679 @@
+# CHANGELOG
+
+## v1.1.0
+
+AgentScope Runtime v1.1.0 通过移除 Runtime 侧自定义的 Memory/Session 服务抽象，并**统一采用 Agent 框架原生的持久化模块**来**简化持久化与会话连续性**。这降低了心智负担，避免概念重复，并确保持久化行为与底层 Agent 框架保持一致。
+
+此外，本版本对 **`AgentApp` 的底层架构进行了重构**：将其改为直接继承 `FastAPI`，引入了**标准的生命周期管理 (Lifespan)**，并新增了支持分布式场景的**任务中断功能**与**并发冲突控制**。
+
+**变更的背景与必要性**
+
+在 v1.0 中，Runtime 提供了自定义的**会话历史（Session History）**和**长期记忆（Long-term Memory）**服务（以及适配器），用于支持跨请求的持久化/状态连续性。在实践中，这引入了若干问题：
+
+1. **重复的持久化栈**
+   Runtime 层和 Agent 框架都提供了持久化状态/历史的方法，导致对“哪个才是唯一可信来源（source of truth）”产生困惑。
+
+2. **维护与兼容性负担**
+   Runtime 特有的服务/适配器需要与多个 Agent 框架及其版本保持同步，增加了升级成本和失败面。
+
+3. **跨框架行为不一致**
+   不同框架暴露的 state/memory/session 语义不同；Runtime 层适配器无法可靠地在所有框架间保持完全一致的行为。
+
+为了解决这些问题，v1.1.0 **弃用并移除**了这些 Runtime 侧服务/适配器，并建议在 `AgentApp` 生命周期中直接使用 **Agent 框架自身的持久化模块**（例如 `JSONSession`、内置 memory 实现）。
+
+**此外，v1.1.0 针对 `AgentApp` 的核心架构进行了重构，将其从“工厂类创建模式”转变为“直接继承 `FastAPI` 模式”。** 这一变更源于以下考量：
+
+1. **解决原有工厂模式的局限性**
+   在旧版本中，`AgentApp` 内部通过工厂类创建并持有 FastAPI 对象。这种包装方式产生了一层“黑盒”，使得开发者难以直接利用 FastAPI 原生的强大功能（如复杂的中间件配置、自定义路由装饰器以及依赖注入系统），且自定义的生命周期钩子（如 `@app.init`）也与标准 Web 开发规范存在偏差。
+
+2. **拥抱原生 FastAPI 生态与扩展性**
+   通过改为**直接继承 `FastAPI` 类**，`AgentApp` 现在即是一个标准的 FastAPI 应用。这种架构赋予了开发者完全的控制权，可以无缝集成 FastAPI 社区的中间件和插件。同时，基于类继承的架构允许我们通过 `Mixin`（混入类）的方式优雅地引入**任务中断（Interrupt）**、**并发状态竞争控制**等高级功能，使 `AgentApp` 成为一个既符合现代 Web 开发标准，又深度适配 Agent 业务场景的核心组件。
+
+### Added
+
+- **分布式任务中断功能**：引入 `InterruptMixin` 及其后端支持（Local/Redis），允许用户自定义接口在任务执行过程中手动触发中断，并支持在分布式集群环境下广播中断信号。
+- **分布式竞态控制**：在任务启动阶段引入基于状态机的原子检查（Compare-and-Swap），有效防止同一 Session ID 在分布式环境下被重复并发执行。
+- **原生 FastAPI 扩展性**：由于 `AgentApp` 现在直接继承自 `FastAPI`，开发者可以直接使用 `@app.get`、`app.add_middleware` 等原生方法，完全兼容 FastAPI 生态。
+
+### Changed
+
+- **推荐的持久化模式**：
+  - 直接使用 Agent 框架的 **Memory** 模块（例如 `InMemoryMemory`，或框架提供的 Redis-backed memory）。
+  - 使用 Agent 框架的 **Session** 模块（例如 `JSONSession`）在 `query` 期间加载/保存 agent 会话状态。
+- **架构重构**：`AgentApp` 由原先的 **工厂类模式** 改为**直接继承 `FastAPI`**。
+- **生命周期统一**：统一了内部框架资源与用户自定义资源的生命周期管理逻辑。
+
+### Breaking Changes
+
+1. **弃用自定义 Memory 与 Session 服务**
+   - 自定义 Runtime **会话历史**和**长期记忆**服务，以及对应的适配器，已被**弃用并移除**。
+   - 这包括**所有相关 Python 文件与文档**。
+   - 任何 v1.0 代码若引用 Runtime 组件，例如：
+     - Runtime 会话历史服务/适配器
+     - Runtime 长期记忆服务/适配器
+     - `AgentScopeSessionHistoryMemory(...)` 风格的适配器用法
+       都必须迁移到 Agent 框架内置的持久化方式。
+2. **移除工厂类模式**
+   - 废弃 `FastAPIAppFactory`。现在应直接实例化 `AgentApp` 对象。
+3. **弃用自定义装饰器钩子**
+   - 弃用并标记了旧版本中的 `@app.init` 和 `@app.shutdown` 装饰器。
+   - **迁移建议**：请使用 FastAPI 标准的 `lifespan` 异步上下文管理器（详见下方迁移指南中的示例）。
+
+#### 迁移指南（v1.0 → v1.1）
+
+##### 推荐模式（统一生命周期管理、中断处理与原生持久化）
+
+在 v1.1.0 中，我们建议使用 **Lifespan 异步上下文管理器** 代替原有的装饰器来管理资源。同时，在 `query` 逻辑中捕获 `asyncio.CancelledError` 以响应中断信号，并使用 Agent 框架原生的 **Session/Memory** 模块进行状态持久化：
+
+```python
+# -*- coding: utf-8 -*-
+import asyncio
+import os
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from agentscope.agent import ReActAgent
+from agentscope.model import DashScopeChatModel
+from agentscope.formatter import DashScopeChatFormatter
+from agentscope.tool import Toolkit, execute_python_code
+from agentscope.pipeline import stream_printing_messages
+from agentscope.memory import InMemoryMemory
+from agentscope.session import JSONSession
+
+from agentscope_runtime.engine.app import AgentApp
+from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
+
+# Standard FastAPI lifespan management
+# (Replaces deprecated @app.init/@app.shutdown)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Use JSONSession here
+    app.state.session = JSONSession(save_dir="./sessions")
+    try:
+        yield
+    finally:
+        # No Runtime state/session services to stop in v1.1
+        pass
+
+# AgentApp now inherits directly from FastAPI
+agent_app = AgentApp(
+    app_name="Friday",
+    app_description="A helpful assistant",
+    lifespan=lifespan,
+    # Optional: Enable distributed interrupt by providing interrupt_redis_url
+    # interrupt_redis_url="redis://localhost"
+)
+
+@agent_app.query(framework="agentscope")
+async def query_func(
+    self,
+    msgs,
+    request: AgentRequest = None,
+    **kwargs,
+):
+    assert kwargs is not None, "kwargs is Required for query_func"
+    session_id = request.session_id
+    user_id = request.user_id
+
+    toolkit = Toolkit()
+    toolkit.register_tool_function(execute_python_code)
+
+    agent = ReActAgent(
+        name="Friday",
+        model=DashScopeChatModel(
+            "qwen-turbo",
+            api_key=os.getenv("DASHSCOPE_API_KEY"),
+            enable_thinking=True,
+            stream=True,
+        ),
+        sys_prompt="You're a helpful assistant named Friday.",
+        toolkit=toolkit,
+        memory=InMemoryMemory(),  # Use InMemoryMemory() directly
+        formatter=DashScopeChatFormatter(),
+    )
+
+    await agent_app.state.session.load_session_state(
+        session_id=session_id,
+        agent=agent,
+    )
+
+    try:
+        async for msg, last in stream_printing_messages(
+            agents=[agent],
+            coroutine_task=agent(msgs),
+        ):
+            yield msg, last
+
+    except asyncio.CancelledError:
+        # Handling Interruptions (New in v1.1.0)
+        await agent.interrupt() # Explicitly halt the underlying agent execution
+
+        # Re-raise to ensure AgentApp correctly updates the task state to STOPPED
+        raise
+
+    finally:
+        # Persistence: Save state regardless of normal completion or interruption
+        await agent_app.state.session.save_session_state(
+            session_id=session_id,
+            agent=agent
+        )
+
+# Optional: Explicit endpoint to trigger task interruption
+@agent_app.post("/stop")
+async def stop_task(request: AgentRequest):
+    await agent_app.stop_chat(
+        user_id=request.user_id,
+        session_id=request.session_id,
+    )
+    return {
+        "status": "success",
+        "message": "Interrupt signal broadcasted.",
+    }
+
+
+agent_app.run()
+```
+
+## v1.0.5
+
+**AgentScope Runtime v1.0.5** 主要聚焦于提升部署灵活性以及 UI/协议层的集成能力。本次版本新增了带 CLI 支持的 PAI 部署器，引入 Boxlite 作为新的沙箱后端，并提供容器客户端工厂以统一容器化部署相关能力。同时新增 AG-UI 协议支持，集成 ModelStudio Memory SDK 及 Demo，并修复了 FC replacement_map、MS-Agent-Framework 兼容性、以及消息流工具调用处理等多个问题。文档也在多个章节进行了更新，并补充了贡献者信息。
+
+### Added
+
+- **PAI 部署器 + CLI 支持**
+  新增 PAI 部署器，提供 CLI 支持，并补充了相关文档与测试。
+- **Boxlite 沙箱后端**
+  新增 Boxlite 作为沙箱后端，可通过 `CONTAINER_DEPLOYMENT=boxlite` 启用。
+- **容器客户端工厂（Container Client Factory）**
+  引入容器客户端工厂，用于规范化/统一容器客户端的创建与使用。
+- **AG-UI 协议支持**
+  新增对 AG-UI 协议的支持，提升与 UI 的互操作性。
+- **ModelStudio Memory SDK + Demo**
+  集成 ModelStudio Memory SDK，并提供示例 Demo。
+
+### Changed
+
+- **向 query_handler 暴露 AgentResponse**
+  通过 `kwargs` 将 `AgentResponse` 暴露给 `query_handler`，增强可扩展性。
+- **部署模块懒加载导入（Lazy Import Loader）**
+  为部署相关模块引入懒加载导入机制，减少导入开销并改善启动表现。
+
+### Fixed
+
+- **FC replacement_map 热修复**
+  修复 Function Compute（FC）部署中的 `replacement_map` 问题。
+- **BaseResponse completed_at**
+  确保 `BaseResponse` 正确设置 `completed_at` 字段。
+- **A2A Registry 可选配置**
+  修复启用 A2A registry 支持但未配置时引发的问题。
+- **MS-Agent-Framework 兼容性**
+  为避免 `ms-agent-framework v1.0.0b260114` 引入的破坏性变更，临时将 `ms-agent-framework` 版本限制在 **低于 `v1.0.0b260114`** 的范围内，以保证运行稳定；后续版本将提供正式适配/升级。
+- **LangGraph 消息流工具调用**
+  增强 LangGraph message stream 中的 tool call 处理逻辑。
+
+### Documentation
+
+- 对 README 与多处文档进行了修正与更新（包括部署、自定义沙箱及其他说明性内容）。
+
+## v1.0.4
+
+在保持 AgentScope Runtime v1.x 框架可扩展性与一致性的基础上，**AgentScope Runtime v1.0.4** 引入了多项部署支持的新特性，包括 Knative 与 Serverless FC 部署器、对 MS-Agent-Framework 的支持，以及异步 Sandbox SDK 以减少阻塞并提升响应速度。同时，本版本优化了 OpenTelemetry Tracer Provider 的安全处理，更新了依赖，并修复了非流式工具的调用问题。文档部分新增了 WebUI 试用入口与部署示例修正，并增添了多位新贡献者。
+
+### Added
+
+- **Knative Deployer 支持**
+  新增 Knative 部署器功能，支持在 Knative 环境中快速部署 AgentScope Runtime。
+- **Serverless FC Deployer 支持**
+  引入 Serverless Function Compute 部署器，方便在云原生无服务器环境运行。
+- **MS-Agent-Framework 支持**
+  框架新增对微软 MS-Agent-Framework 的兼容与集成。
+- **Async Sandbox SDK**
+  推出异步版 Sandbox SDK，实现非阻塞调用，提升系统的交互响应速度。
+- **Try WebUI 入口**
+  在文档中新增试用 WebUI 的快速访问链接，方便用户体验最新功能。
+
+### Changed
+
+- **依赖更新**
+  更新 `nacos-sdk-python` 依赖版本，增强稳定性与兼容性。
+
+### Fixed
+
+- **非流式工具调用支持**
+  修复不同类型工具在非流式调用模式下的兼容性问题。
+- **OpenTelemetry Tracer Provider 安全处理**
+  增加对已有 Tracer Provider 的安全检测与合理处理，避免冲突。
+
+### Documentation
+
+- 更新 README，增加 WebUI 访问 URL。
+- 部署示例（本地部署）中修正方法调用名称。
+
+## v1.0.3
+
+AgentScope Runtime v1.0.3 在保持 v1.x 框架可扩展性与一致性的基础上，带来了 **A2A 协议注册支持**、更完整的异常与 Token 使用统计机制、新的天气组件与 UI 交互能力，以及多个 Sandbox、Redis、Agent 状态的修复与优化。同时改进了部署构建（Sandbox Image Building）、远程桌面自定义 URL 支持、PYPI 镜像配置等功能。
+
+### Added
+
+- **A2A Registry 支持**
+  新增对 Google A2A 协议的注册能力，可与 AgentScope-Runtime 原生集成，实现跨平台智能体注册与发现。
+- **Token 使用统计（即使报错）**
+  新增功能可在模型调用过程中，即便抛出异常，也获取到本次调用的 Token 使用量，便于计费与调试。
+- **Sandbox 镜像构建 Actions**
+  在 CI/CD 中新增构建 Sandbox 镜像的 GitHub Actions，方便分发与部署自动化。
+
+### Changed
+
+- **部署 PYPI 镜像配置优化**
+  `pypi_mirror` 改为可指定输入并默认为 `None`，便于自定义 Python 包源。
+
+### Fixed
+
+- **RedisMapping 扫描键解析问题**
+  修复 `RedisMapping.scan` 在 `decode_responses` 模式下的键解析错误。
+- **Redis 异步客户端关闭方式**
+  调整为使用 `aclose` 关闭 Redis 异步客户端，避免`warning`。
+- **AgentBay 版本修复**
+  修复 `agentbay` 版本依赖问题，保证运行时一致性。
+- **VNC 远程桌面自定义 URL 前缀支持**
+  支持 VNC Remote Desktop 使用自定义 URL 前缀，提升部署灵活性。
+- **会话与记忆热修复**
+  新增 `Redis Session` 与 `Redis Memory` 过期时间。
+
+## v1.0.2
+
+本次更新为 AgentScope Runtime v1.0.2，带来了 LangGraph 与 Agno 在 v1.x 框架下的支持、工具调用优化、移动端沙箱 UI 增强，以及多个兼容性与稳定性修复。
+同时改进了 CLI 工具、MCP Tool 调用处理，并统一了业务异常管理。
+
+### Added
+
+- **LangGraph 支持**：新增对 LangGraph 框架的原生兼容。
+- **多框架支持扩展**：在 v1.x 中加入对 Agno 框架的支持。
+- **移动端沙箱 UI**：支持在 WebUI 中展示移动端沙箱画面。
+- **CLI 工具**：新增命令行执行与管理功能。
+- **统一业务异常**：引入统一的业务异常类。
+- **MCP Tool Call/Output 处理**：新增 MCP 工具调用与输出的适配。
+
+### Changed
+
+- 优化工具流式调用与输出的支持。
+- 改进 `adapt_agentscope_message_stream` 对非 JSON 输出的兼容处理。
+- 更新 `.npmrc` 以禁用 package-lock，并调整 peer dependency 配置。
+
+### Fixed
+
+- **LangChain** 依赖补充（含 `langchain_openai`）。
+- 修复 LangGraph 单元测试。
+- 测试中引入 **per-function event loop** 以解决 Agno 下 "Event loop is closed" 错误。
+- 修复沙箱中MCP`streamable_http` 超时类型不匹配问题。
+- 修复 OSS 配置在 AgentRun 场景下的异常。
+
+### Documentation
+
+- 更新社区二维码。
+- 文档微调与错误修正。
+
+## v1.0.1
+
+AgentScope Runtime v1.0.1 主要包括稳定性修复、开发体验优化、运行时配置增强，以及 Windows WebUI 启动兼容性支持。同时引入服务工厂机制、工具调用类型区分，以及依赖更新对 AgentScope 1.0.9 的支持。
+
+### Added
+
+- **服务工厂（Service Factory）** 支持，更灵活创建运行时服务。
+- 在 AgentScope 内区分 **Tool Call** 与 **MCP Tool Call**。
+
+### Changed
+
+- 引入新的 **runtime config** 运行时配置机制。
+- 更新依赖以支持 AgentScope 1.0.9。
+
+### Fixed
+
+- 修复 AgentScope 消息转换逻辑。
+- 修复 Windows 平台下 WebUI 启动问题（`subprocess.Popen` + shell 参数处理）。
+- 修复表格存储（Table Store）相关问题。
+
+### Documentation
+
+- 更新 serverless 部署文档。
+
+## v1.0.0
+
+AgentScope Runtime v1.0 在高效智能体部署与安全沙箱执行的坚实基础上，推出了统一的 “Agent 作为 API” 开发体验，覆盖完整智能体从本地开发到生产部署的生命周期，并扩展了更多沙箱类型、协议兼容性与更丰富的内置工具集。
+
+**变更背景与必要性**
+
+在 v0.x 版本中，AgentScope 的 Agent 模块（如 `AgentScopeAgent`、`AutoGenAgent` 等）采用黑盒化模块替换方式，通过直接将 Agent 对象传入 `AgentApp` 或 `Runner` 执行。这种封装在单智能体简单场景可以工作，但在复杂应用、尤其是多智能体组合时暴露了以下严重问题：
+
+1. **自定义 Memory 模块会被黑盒替换**
+   用户在开发环境中自定义的 Memory（如 `InMemoryMemory` 或自写类）在生产部署时会被不透明地替换为 `RedisMemory` 等实现，用户无法感知这种变化，也无法控制替换行为，导致线上与本地表现不一致。
+2. **Agent State 未得到保留**
+   旧框架缺少智能体状态序列化与恢复机制，多轮交互或任务中断后无法保留 agent 内部状态（如思考链、上下文变量），影响长任务的连续性。
+3. **无法挂载自定义逻辑（Hooks）**
+   由于生命周期全被封装在内部，用户无法在 Agent 或执行阶段添加钩子函数（hooks），例如：
+   - 在推理前后插入自定义数据处理
+   - 运行时动态修改工具集或 prompt
+4. **多智能体与跨框架组合受限**
+   黑盒模式无法在不同 agent 实例之间共享会话记录、长短期记忆服务、工具集，也难以将不同 agent 框架（如 ReActAgent 与 LangGraphAgent）无缝组合。
+
+以上缺陷直接限制了 AgentScope Runtime在真实生产环境的可扩展性与可维护性，也使得“开发环境与生产环境一致”的目标无法实现。
+
+因此，v1.0.0 重构了 Agent 接入模式，引入 **白盒化适配器模式** —— 通过 `AgentApp` 与 `Runner` 装饰器明确暴露初始化 (`init` / `init_handler`)、执行 (`query` / `query_handler`)、关闭 (`shutdown` / `shutdown_handler`) 生命周期，使：
+
+- 记忆、会话、工具注册等运行时能力可按需插入
+- Agent 状态可显式管理与持久化
+- 用户可挂载 hooks 实现复杂自定义流程
+- 完整支持多智能体构建与跨框架组合
+
+主要改进：
+- **统一的开发/生产范式**：智能体在开发与生产环境中保持一致的功能性。
+- **原生多智能体支持**：完全兼容 AgentScope 的多智能体范式。
+- **主流 SDK 与协议集成**：支持 OpenAI SDK 与 Google A2A 协议。
+- **可视化 Web UI**：部署后开箱即用的 Web 聊天界面。
+- **扩展沙箱类型**：支持 GUI、浏览器、文件系统、移动端、云端（大部分可通过 VNC 可视化）。
+- **丰富的内置工具集**：面向生产的搜索、RAG、AIGC、支付等模块。
+- **灵活的部署模式**：支持本地线程/进程、Docker、Kubernetes、或托管云端部署。
+
+### Added
+- 原生Short/Long Memory、智能体 State 适配器集成至 AgentScope Framework。
+- 新聊天式 Web UI。
+- 新增多种 Sandbox 类型（移动端沙箱、AgentBay无影云沙箱）。
+
+### Changed
+- `AgentApp`不再接受`Agent`作为入参数，用户需要通过`query`、`init`、`shutdown`装饰器自定义智能体应用的生命周期与请求逻辑。
+- `Runner`不再接受`Agent`作为入参数，用户需要通过`query_handler`、`init_handler`、`shutdown_handler`自定义执行期的生命周期与请求逻辑。
+
+### Breaking Changes
+以下变更会影响现有 v0.x 用户，需要手动适配：
+1. **Agent模块接口迁移**
+
+   - `AgentScopeAgent`、`AutoGenAgent`、`LangGraphAgent`、`AgnoAgent` 等Agent模块已被移除，相关 API 迁移到 `AgentApp` 内的`query`、`init`、`shutdown`装饰器中。
+   - **示例迁移**：
+
+     ```python
+     # v0.x
+     agent = AgentScopeAgent(
+         name="Friday",
+         model=DashScopeChatModel(
+             "qwen-turbo",
+             api_key=os.getenv("DASHSCOPE_API_KEY"),
+             enable_thinking=True,
+             stream=True,
+         ),
+         agent_config={
+             "sys_prompt": "You're a helpful assistant named Friday.",
+           	"memory": InMemoryMemory(),
+         },
+         agent_builder=ReActAgent,
+     )
+     app = AgentApp(agent=agent, endpoint_path="/process")
+
+
+     # v1.0
+     agent_app = AgentApp(
+         app_name="Friday",
+         app_description="A helpful assistant",
+     )
+
+     @agent_app.init
+     async def init_func(self):
+         self.state_service = InMemoryStateService()
+         self.session_service = InMemorySessionHistoryService()
+         await self.state_service.start()
+         await self.session_service.start()
+
+     @agent_app.shutdown
+     async def shutdown_func(self):
+         await self.state_service.stop()
+         await self.session_service.stop()
+
+     @agent_app.query(framework="agentscope")
+     async def query_func(
+         self,
+         msgs,
+         request: AgentRequest = None,
+         **kwargs,
+     ):
+         session_id = request.session_id
+         user_id = request.user_id
+
+         state = await self.state_service.export_state(
+             session_id=session_id,
+             user_id=user_id,
+         )
+
+         agent = ReActAgent(
+             name="Friday",
+             model=DashScopeChatModel(
+                 "qwen-turbo",
+                 api_key=os.getenv("DASHSCOPE_API_KEY"),
+                 enable_thinking=True,
+                 stream=True,
+             ),
+             sys_prompt="You're a helpful assistant named Friday.",
+             toolkit=toolkit,
+             memory=AgentScopeSessionHistoryMemory(
+                 service=self.session_service,
+                 session_id=session_id,
+                 user_id=user_id,
+             ),
+             formatter=DashScopeChatFormatter(),
+         )
+         agent.set_console_output_enabled(enabled=False)
+
+         if state:
+             agent.load_state_dict(state)
+
+         async for msg, last in stream_printing_messages(
+             agents=[agent],
+             coroutine_task=agent(msgs),
+         ):
+             yield msg, last
+
+         state = agent.state_dict()
+
+         await self.state_service.save_state(
+             user_id=user_id,
+             session_id=session_id,
+             state=state,
+         )
+     ```
+
+2. **Runner 调整**
+
+   - 原 `Runner` 初始化方法替换为新的接口，用户需要覆盖父类方法`query_handler`、`init_handler`、`shutdown_handler`
+
+   - **示例迁移**：
+
+     ```python
+     # v0.x
+     agent = AgentScopeAgent(
+         name="Friday",
+         model=DashScopeChatModel(
+             "qwen-turbo",
+             api_key=os.getenv("DASHSCOPE_API_KEY"),
+             stream=True,
+         ),
+         agent_config={
+             "sys_prompt": "You're a helpful assistant named Friday.",
+           	"memory": InMemoryMemory(),
+         },
+         agent_builder=ReActAgent,
+     )
+
+     runner = Runner(
+         agent=agent,
+         context_manager=ContextManager(),
+         environment_manager=EnvironmentManager(),
+     )
+
+     # v1.0
+     class MyRunner(Runner):
+         def __init__(self) -> None:
+             super().__init__()
+             self.framework_type = "agentscope"
+
+         async def query_handler(
+             self,
+             msgs,
+             request: AgentRequest = None,
+             **kwargs,
+         ):
+             session_id = request.session_id
+             user_id = request.user_id
+
+             state = await self.state_service.export_state(
+                 session_id=session_id,
+                 user_id=user_id,
+             )
+
+             agent = ReActAgent(
+                 name="Friday",
+                 model=DashScopeChatModel(
+                     "qwen-turbo",
+                     api_key=os.getenv("DASHSCOPE_API_KEY"),
+                     stream=True,
+                 ),
+                 sys_prompt="You're a helpful assistant named Friday.",
+                 toolkit=toolkit,
+                 memory=AgentScopeSessionHistoryMemory(
+                     service=self.session_service,
+                     session_id=session_id,
+                     user_id=user_id,
+                 ),
+                 formatter=DashScopeChatFormatter(),
+             )
+
+             if state:
+                 agent.load_state_dict(state)
+             async for msg, last in stream_printing_messages(
+                 agents=[agent],
+                 coroutine_task=agent(msgs),
+             ):
+                 yield msg, last
+
+             state = agent.state_dict()
+             await self.state_service.save_state(
+                 user_id=user_id,
+                 session_id=session_id,
+                 state=state,
+             )
+
+         async def init_handler(self, *args, **kwargs):
+             self.state_service = InMemoryStateService()
+             self.session_service = InMemorySessionHistoryService()
+             self.sandbox_service = SandboxService()
+             await self.state_service.start()
+             await self.session_service.start()
+             await self.sandbox_service.start()
+
+         async def shutdown_handler(self, *args, **kwargs):
+             await self.state_service.stop()
+             await self.session_service.stop()
+             await self.sandbox_service.stop()
+     ```
+
+3. **Tool抽象接口变更**
+
+   - 原 `SandboxTool` 抽象被移除，使用原生Sandbox方法
+
+   - 示例迁移：
+
+     ```python
+     # v0.x
+     print(run_ipython_cell(code="print('hello world')"))
+     print(run_shell_command(command="whoami"))
+
+     # v1.0
+     with BaseSandbox() as sandbox():
+         print(sandbox.run_ipython_cell(code="print('hello world')"))
+         print(sandbox.run_shell_command(command="whoami"))
+     ```
+
+     ```python
+     # v0.x
+     BROWSER_TOOLS = [
+         browser_navigate,
+         browser_take_screenshot,
+         browser_snapshot,browser_click,
+         browser_type,
+     ]
+
+     agent = AgentScopeAgent(
+         name="Friday",
+         model=model,
+         agent_config={
+             "sys_prompt": SYSTEM_PROMPT,
+         },
+         tools=BROWSER_TOOLS,
+         agent_builder=ReActAgent,
+     )
+
+     # v1.0
+     sandbox = sandbox_service.connect(
+         session_id=session_id,
+         user_id=user_id,
+         sandbox_types=["browser"],
+     )
+     sandbox = sandboxes[0]
+     browser_tools = [
+         sandbox.browser_navigate,
+         sandbox.browser_take_screenshot,
+         sandbox.browser_snapshot,
+         sandbox.browser_click,
+         sandbox.browser_type,
+     ]
+
+     toolkit = Toolkit()
+     for tool in browser_tools:
+         toolkit.register_tool_function(sandbox_tool_adapter(tool))
+     ```
+
+### Removed
+- `ContextManager`和`EnvironmentManager`已被移除，现在由Agent进行上下文管理
+- `AgentScopeAgent`、`AutoGenAgent`、`LangGraphAgent`、`AgnoAgent` 已被移除，相关逻辑迁移到 `AgentApp` 内的`query`、`init`、`shutdown`装饰器中以供用户白盒化开发。
+- `SandboxTool`和`MCPTool`抽象已被移除，现在通过`sandbox_tool_adapter`适配不同框架
+
+## v0.2.0
+
+简化 agent 部署，并确保本地开发与生产部署的一致性。
+
+### Added
+
+- **Agent 部署支持**：可部署到 Docker、Kubernetes、以及阿里云函数计算（FC）。
+- **Python SDK for Deployed Agent**：用于与已部署 agent 交互。
+- **类 App 部署模式**：支持打包部署成应用形式。
+
+### Changed
+
+- **统一 K8S & Docker 客户端**：将客户端移动到公共模块，简化维护。
+
+## v0.1.6
+
+提升对 AgentScope 全特性的原生支持，并增强 sandbox 的可交互性与可扩展性。
+
+### Added
+
+- **更多消息/事件类型**：扩展 Agent Framework 对多模态消息、事件的支持。
+- **多 pool 管理**：Sandbox Manager 支持管理多个 sandbox pool。
+- **GUI Sandbox**：提供图形化界面来操作 Sandbox。
+- **内置浏览器 Sandbox 前端**：基于 Web 的 sandbox 双控界面。
+- **异步方法与并行执行**：支持大规模并发处理。
+- **E2B SDK 兼容**：Sandbox 服务支持与 E2B SDK 对接。
+
+## v0.1.5
+
+优化依赖安装，移除不再需要的 LLM Agent 模块，增强 sandbox 客户端功能。
+
+### Added
+
+- **FC (AgentRun) Sandbox 客户端**：支持在函数计算环境中运行 Sandbox。
+- **自定义容器镜像与多目录绑定**：可指定镜像名及绑定多个目录。
+
+### Changed
+
+- **安装选项优化**：将 AgentScope 和 Sandbox 作为基础依赖，简化安装。
+
+### Removed
+
+- **LLM Agent & API**：删除 LLM Agent 及相关接口。

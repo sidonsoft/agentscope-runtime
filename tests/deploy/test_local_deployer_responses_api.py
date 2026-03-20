@@ -1,0 +1,131 @@
+# -*- coding: utf-8 -*-
+# pylint: disable=line-too-long, unused-argument
+import asyncio
+import os
+
+import pytest
+from agentscope.agent import ReActAgent
+from agentscope.formatter import DashScopeChatFormatter
+from agentscope.model import DashScopeChatModel
+from agentscope.pipeline import stream_printing_messages
+from agentscope.memory import InMemoryMemory
+from agentscope.session import RedisSession
+
+from agentscope_runtime.engine.app import AgentApp
+from agentscope_runtime.engine.deployers.adapter.responses.response_api_protocol_adapter import (  # noqa: E501
+    ResponseAPIDefaultAdapter,
+)
+from agentscope_runtime.engine.deployers.local_deployer import (
+    LocalDeployManager,
+)
+from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
+
+
+def local_deploy():
+    asyncio.run(_local_deploy())
+
+
+async def _local_deploy():
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
+    server_port = int(os.environ.get("SERVER_PORT", "8090"))
+    server_endpoint = os.environ.get("SERVER_ENDPOINT", "agent")
+
+    # Create AgentApp
+    agent_app = AgentApp(
+        app_name="Friday",
+        app_description="A helpful assistant",
+    )
+
+    # Initialize services
+    @agent_app.init
+    async def init_func(self):
+        import fakeredis
+
+        fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        # NOTE: This FakeRedis instance is for development/testing only.
+        # In production, replace it with your own Redis client/connection
+        # (e.g., aioredis.Redis)
+        self.session = RedisSession(connection_pool=fake_redis.connection_pool)
+
+    # Define query handler
+    @agent_app.query(framework="agentscope")
+    async def query_func(
+        self,
+        msgs,
+        request: AgentRequest = None,
+        **kwargs,
+    ):
+        session_id = request.session_id
+        user_id = request.user_id
+
+        agent = ReActAgent(
+            name="Friday",
+            model=DashScopeChatModel(
+                "qwen-max",
+                api_key=os.getenv("DASHSCOPE_API_KEY"),
+                stream=True,
+            ),
+            sys_prompt="You're a helpful assistant named {name}.",
+            memory=InMemoryMemory(),
+            formatter=DashScopeChatFormatter(),
+        )
+
+        await self.session.load_session_state(
+            session_id=session_id,
+            user_id=user_id,
+            agent=agent,
+        )
+
+        async for msg, last in stream_printing_messages(
+            agents=[agent],
+            coroutine_task=agent(msgs),
+        ):
+            yield msg, last
+
+        await self.session.save_session_state(
+            session_id=session_id,
+            user_id=user_id,
+            agent=agent,
+        )
+
+    # Create responses adapter
+    responses_adapter = ResponseAPIDefaultAdapter()
+    deploy_id = ""
+    deploy_manager = LocalDeployManager(host="localhost", port=server_port)
+    try:
+        deployment_info = await agent_app.deploy(
+            deploy_manager,
+            endpoint_path=f"/{server_endpoint}",
+            protocol_adapters=[responses_adapter],
+        )
+        deploy_id = deployment_info["deploy_id"]
+        print("✅ Service deployed successfully!")
+        print(f"   URL: {deployment_info['url']}")
+        print(f"   Endpoint: {deployment_info['url']}/{server_endpoint}")
+        print("\nAgent Service is running in the background.")
+
+        # Run the service for a short duration
+        await asyncio.sleep(1)
+
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # This block will be executed when you press Ctrl+C.
+        print("\nShutdown signal received. Stopping the service...")
+        if deploy_manager.is_running:
+            await deploy_manager.stop(deploy_id)
+        print("✅ Service stopped.")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        if deploy_manager.is_running:
+            await deploy_manager.stop(deploy_id)
+    finally:
+        if deploy_manager.is_running:
+            await deploy_manager.stop(deploy_id)
+        print("✅ Service stopped after test.")
+
+
+@pytest.mark.asyncio
+async def test_local_deployer_responses_api():
+    await _local_deploy()

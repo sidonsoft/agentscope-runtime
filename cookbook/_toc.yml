@@ -1,0 +1,117 @@
+format: jb-book
+root: en/intro
+parts:
+- caption: Tutorial
+  numbered: 1
+  chapters:
+  - file: en/install.md
+  - file: en/concept.md
+  - file: en/quickstart.md
+  - file: en/tool.md
+    sections:
+    - file: en/sandbox/sandbox.md
+      sections:
+        - file: en/sandbox/sandbox_service.md
+        - file: en/sandbox/sandbox_fs.md
+        - file: en/sandbox/advanced.md
+        - file: en/sandbox/training_sandbox.md
+        - file: en/sandbox/troubleshooting.md
+    - file: en/tools/tools.md
+      sections:
+        - file: en/tools/modelstudio_search.md
+        - file: en/tools/modelstudio_rag.md
+        - file: en/tools/modelstudio_generations.md
+        - file: en/tools/alipay.md
+        - file: en/tools/realtime_clients.md
+  - file: en/deployment.md
+    sections:
+      - file: en/agent_app.md
+      - file: en/advanced_deployment.md
+      - file: en/react_agent.md
+  - file: en/use.md
+    sections:
+      - file: en/call.md
+      - file: en/webui.md
+      - file: en/cli.md
+      - file: en/tracing.md
+      - file: en/protocol.md
+      - file: en/demohouse.md
+      - file: en/a2a_registry.md
+      - file: en/ut.md
+      - file: en/langgraph_guidelines.md
+      - file: en/agno_guidelines.md
+      - file: en/ms_agent_framework_guidelines.md
+  - file: en/contribute.md
+    sections:
+      - file: en/README.md
+  - file: en/CHANGELOG.md
+
+- caption: API Reference
+  chapters:
+  - file: en/api/index.md
+    title: "API Reference"
+    sections:
+    - file: en/api/sandbox.md
+      title: "Sandbox"
+    - file: en/api/engine.md
+      title: "Engine"
+
+- caption: 简介
+  chapters:
+  - file: zh/intro.md
+    title: "0. 介绍"
+
+- caption: 教程
+  numbered: 1
+  chapters:
+  - file: zh/install.md
+  - file: zh/concept.md
+  - file: zh/quickstart.md
+  - file: zh/tool.md
+    sections:
+      - file: zh/sandbox/sandbox.md
+        sections:
+          - file: zh/sandbox/sandbox_service.md
+          - file: zh/sandbox/sandbox_fs.md
+          - file: zh/sandbox/advanced.md
+          - file: zh/sandbox/training_sandbox.md
+          - file: zh/sandbox/troubleshooting.md
+      - file: zh/tools/tools.md
+        sections:
+          - file: zh/tools/modelstudio_search.md
+          - file: zh/tools/modelstudio_rag.md
+          - file: zh/tools/modelstudio_generations.md
+          - file: zh/tools/alipay.md
+          - file: zh/tools/realtime_clients.md
+  - file: zh/deployment.md
+    sections:
+      - file: zh/agent_app.md
+      - file: zh/advanced_deployment.md
+      - file: zh/react_agent.md
+  - file: zh/use.md
+    sections:
+      - file: zh/call.md
+      - file: zh/webui.md
+      - file: zh/cli.md
+      - file: zh/tracing.md
+      - file: zh/protocol.md
+      - file: zh/demohouse.md
+      - file: zh/a2a_registry.md
+      - file: zh/ut.md
+      - file: zh/langgraph_guidelines.md
+      - file: zh/agno_guidelines.md
+      - file: zh/ms_agent_framework_guidelines.md
+  - file: zh/contribute.md
+    sections:
+    - file: zh/README.md
+  - file: zh/CHANGELOG.md
+
+- caption: API 参考
+  chapters:
+  - file: zh/api/index.md
+    title: "API 参考"
+    sections:
+    - file: zh/api/sandbox.md
+      title: "Sandbox"
+    - file: zh/api/engine.md
+      title: "Engine"
